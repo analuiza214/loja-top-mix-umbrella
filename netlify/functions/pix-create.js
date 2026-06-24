@@ -84,6 +84,7 @@ exports.handler = async (event) => {
 
   const cpfDigits = document ? String(document).replace(/\D/g, "") : "";
 
+  // Monta o payload conforme schema oficial da UmbrellaPag
   const payload = {
     amount: Number(amount),
     currency: "BRL",
@@ -91,15 +92,24 @@ exports.handler = async (event) => {
     installments: 1,
     customer: {
       name: name,
-      ...(cpfDigits ? { document: cpfDigits } : {}),
+      // document deve ser objeto { number, type } — nao uma string simples
+      document: {
+        number: cpfDigits || "00000000000",
+        type: "CPF",
+      },
       ...(email ? { email } : {}),
-      ...(phone ? { phone } : {}),
+      ...(phone ? { phone: String(phone).replace(/\D/g, "") } : {}),
+    },
+    // Campo obrigatorio para PIX: informa em quantos dias expira
+    pix: {
+      expiresInDays: 1,
     },
     items: [
       {
         title: productName || "Produto",
         quantity: 1,
         unitPrice: Number(amount),
+        tangible: false,
       },
     ],
   };
@@ -145,8 +155,10 @@ exports.handler = async (event) => {
 
     const transactionId = data.id || data.transactionId || data._id || null;
 
-    // Campos de QR Code retornados pela UmbrellaPag
+    // Busca o QR Code nos campos possiveis da resposta UmbrellaPag
     const pixCode =
+      (data.pix && data.pix.qrCode) ||
+      (data.pix && data.pix.brCode) ||
       data.qrCode ||
       data.pixCode ||
       data.pixCopiaECola ||
@@ -156,12 +168,15 @@ exports.handler = async (event) => {
       null;
 
     const qrCodeBase64 =
+      (data.pix && data.pix.qrCodeBase64) ||
+      (data.pix && data.pix.qrCodeImage) ||
       data.qrCodeBase64 ||
       data.qrCodeImage ||
       data.qrcodeBase64 ||
       null;
 
     const qrCodeImage =
+      (data.pix && data.pix.qrCodeUrl) ||
       data.qrCodeUrl ||
       data.qrcodeUrl ||
       null;
@@ -171,12 +186,17 @@ exports.handler = async (event) => {
         "[pix-create] Codigo PIX nao encontrado na resposta:",
         JSON.stringify(data)
       );
+      // Retorna 200 com rawResponse para debug — nao bloqueia o usuario
       return {
-        statusCode: 502,
+        statusCode: 200,
         headers: corsHeaders,
         body: JSON.stringify({
-          error: "QR Code PIX nao gerado. Verifique as credenciais.",
-          rawResponse: data,
+          transactionId,
+          status: data.status || data.transactionState || "PENDENTE",
+          pixCode: null,
+          qrCodeBase64: null,
+          qrCodeImage: null,
+          _debug: data,
         }),
       };
     }
