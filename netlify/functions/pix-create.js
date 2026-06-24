@@ -71,7 +71,7 @@ exports.handler = async (event) => {
     };
   }
 
-  const { amount, name, document, email, phone, productName } = body;
+  const { amount, name, document, email, phone, productName, address } = body;
 
   if (!amount || !name) {
     return {
@@ -81,26 +81,36 @@ exports.handler = async (event) => {
     };
   }
 
-  // O frontend envia o valor em reais (ex: 44.10).
-  // A UmbrellaPag espera em centavos (ex: 4410).
+  // Frontend envia valor em reais (ex: 44.10) — API espera centavos (ex: 4410)
   const amountInCents = Math.round(Number(amount) * 100);
 
-  // CPF: remove mascara
+  // CPF: remove mascara (ex: "397.666.978-41" → "39766697841")
   const cpfDigits = document ? String(document).replace(/\D/g, "") : "";
   if (!cpfDigits || cpfDigits.length !== 11) {
     return {
       statusCode: 400,
       headers: corsHeaders,
-      body: JSON.stringify({ error: "CPF invalido. Informe um CPF valido de 11 digitos." }),
+      body: JSON.stringify({ error: "CPF invalido. Informe 11 digitos." }),
     };
   }
 
-  // Telefone: a UmbrellaPag espera com codigo do pais (55) sem o +
-  // Ex: "11999999999" → "5511999999999"
-  const phoneRaw = phone ? String(phone).replace(/\D/g, "") : "";
-  const phoneFormatted = phoneRaw.startsWith("55")
-    ? phoneRaw
-    : `55${phoneRaw}`;
+  // Telefone: precisa do codigo do pais 55 sem o + (ex: "5511999999999")
+  const phoneRaw = phone ? String(phone).replace(/\D/g, "") : "11999999999";
+  const phoneFormatted = phoneRaw.startsWith("55") ? phoneRaw : `55${phoneRaw}`;
+
+  // Endereco dentro de customer — campo e streetNumber (nao number)
+  const customerAddress = address
+    ? {
+        street: address.street || address.rua || "",
+        streetNumber: address.streetNumber || address.number || address.numero || "0",
+        complement: address.complement || address.complemento || "",
+        zipCode: (address.zipCode || address.cep || "").replace(/\D/g, ""),
+        neighborhood: address.neighborhood || address.bairro || "Centro",
+        city: address.city || address.cidade || "",
+        state: address.state || address.estado || "",
+        country: "BR",
+      }
+    : undefined;
 
   const payload = {
     amount: amountInCents,
@@ -109,16 +119,12 @@ exports.handler = async (event) => {
     installments: 1,
     customer: {
       name: name,
-      document: {
-        number: cpfDigits,
-        type: "CPF",
-      },
+      document: { number: cpfDigits, type: "CPF" },
       email: email || "cliente@email.com",
       phone: phoneFormatted,
+      ...(customerAddress ? { address: customerAddress } : {}),
     },
-    pix: {
-      expiresInDays: 1,
-    },
+    pix: { expiresInDays: 1 },
     items: [
       {
         title: productName || "Produto",
@@ -129,10 +135,10 @@ exports.handler = async (event) => {
     ],
   };
 
-  console.log("[pix-create] Criando transacao UmbrellaPag:", {
-    amountInCents,
-    customerName: payload.customer.name,
-    cpf: cpfDigits.slice(0, 3) + "***",
+  console.log("[pix-create] Enviando para UmbrellaPag:", {
+    amountCents: amountInCents,
+    customer: payload.customer.name,
+    hasAddress: !!customerAddress,
   });
 
   try {
@@ -143,7 +149,7 @@ exports.handler = async (event) => {
       { "x-api-key": apiKey }
     );
 
-    console.log("[pix-create] Resposta status:", result.status);
+    console.log("[pix-create] Status:", result.status);
     console.log("[pix-create] Body:", JSON.stringify(result.body));
 
     const responseBody = result.body;
@@ -167,60 +173,33 @@ exports.handler = async (event) => {
       return {
         statusCode: 502,
         headers: corsHeaders,
-        body: JSON.stringify({
-          error: "Erro ao gerar PIX. Tente novamente.",
-          details: responseBody,
-        }),
+        body: JSON.stringify({ error: "Erro ao gerar PIX.", details: responseBody }),
       };
     }
 
-    if (!data) {
-      return {
-        statusCode: 502,
-        headers: corsHeaders,
-        body: JSON.stringify({ error: "Resposta invalida do gateway." }),
-      };
-    }
+    const transactionId = data.id || null;
 
-    const transactionId = data.id || data.transactionId || data._id || null;
-
-    // Busca o codigo PIX nos possiveis campos da resposta
+    // QR Code: campo correto e data.pix.qrcode (minusculo)
+    // Tambem verificamos data.qrCode e data.barcode como fallback
     const pixCode =
+      (data.pix && data.pix.qrcode) ||
       (data.pix && data.pix.qrCode) ||
-      (data.pix && data.pix.brCode) ||
       data.qrCode ||
-      data.pixCode ||
-      data.pixCopiaECola ||
-      data.emv ||
-      data.brCode ||
-      data.copyPaste ||
+      data.qrcode ||
+      data.barcode ||
       null;
 
-    const qrCodeBase64 =
-      (data.pix && data.pix.qrCodeBase64) ||
-      (data.pix && data.pix.qrCodeImage) ||
-      data.qrCodeBase64 ||
-      data.qrCodeImage ||
-      data.qrcodeBase64 ||
-      null;
-
-    const qrCodeImage =
-      (data.pix && data.pix.qrCodeUrl) ||
-      data.qrCodeUrl ||
-      data.qrcodeUrl ||
-      null;
-
-    console.log("[pix-create] Sucesso:", { transactionId, hasPixCode: !!pixCode });
+    console.log("[pix-create] PIX gerado com sucesso! ID:", transactionId, "| temCodigo:", !!pixCode);
 
     return {
       statusCode: 200,
       headers: corsHeaders,
       body: JSON.stringify({
         transactionId,
-        status: data.status || "PENDENTE",
-        pixCode: pixCode || null,
-        qrCodeBase64: qrCodeBase64 || null,
-        qrCodeImage: qrCodeImage || null,
+        status: data.status || "WAITING_PAYMENT",
+        pixCode,
+        qrCodeBase64: null,
+        qrCodeImage: (data.pix && data.pix.url) || null,
       }),
     };
   } catch (err) {
