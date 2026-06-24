@@ -21,6 +21,14 @@ function formatPhone(v: string) {
   return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
 }
 
+function formatCpf(v: string) {
+  const d = v.replace(/\D/g, "").slice(0, 11);
+  if (d.length <= 3) return d;
+  if (d.length <= 6) return `${d.slice(0, 3)}.${d.slice(3)}`;
+  if (d.length <= 9) return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6)}`;
+  return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
+}
+
 function formatCep(v: string) {
   const d = v.replace(/\D/g, "").slice(0, 8);
   if (d.length > 5) return `${d.slice(0, 5)}-${d.slice(5)}`;
@@ -76,7 +84,7 @@ export default function Checkout() {
   });
 
   const [buyer, setBuyer] = useState({
-    nome: "", email: "", telefone: ""
+    nome: "", email: "", telefone: "", cpf: ""
   });
 
   const [card, setCard] = useState({
@@ -151,6 +159,7 @@ export default function Checkout() {
     if (!buyer.nome.trim()) errors.nome = "Obrigatório";
     if (!buyer.email.trim() || !buyer.email.includes("@")) errors.email = "E-mail inválido";
     if (buyer.telefone.replace(/\D/g, "").length < 10) errors.telefone = "Telefone inválido";
+    if (buyer.cpf.replace(/\D/g, "").length !== 11) errors.cpf = "CPF inválido — informe os 11 dígitos";
 
     const cepDigits = address.cep.replace(/\D/g, "");
     if (cepDigits.length !== 8) errors.cep = "CEP inválido — informe os 8 dígitos";
@@ -261,7 +270,7 @@ export default function Checkout() {
           customerName: buyer.nome,
           customerEmail: buyer.email,
           customerPhone: buyer.telefone.replace(/\D/g, ""),
-          customerDocument: null,
+          customerDocument: buyer.cpf.replace(/\D/g, ""),
           productName: items.map(i => i.name).join(", "),
           valueInCents: Math.round(finalAmount * 100),
           tracking,
@@ -276,6 +285,7 @@ export default function Checkout() {
       name: buyer.nome,
       email: buyer.email,
       phone: buyer.telefone,
+      document: buyer.cpf,
       address: {
         zipCode: cepRaw,
         state: address.estado,
@@ -480,6 +490,17 @@ export default function Checkout() {
                     />
                     {formErrors.telefone && <p className="text-xs text-red-500">{formErrors.telefone}</p>}
                   </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-semibold text-gray-700">CPF *</Label>
+                  <Input
+                    placeholder="000.000.000-00"
+                    value={buyer.cpf}
+                    onChange={e => setBuyer(b => ({ ...b, cpf: formatCpf(e.target.value) }))}
+                    inputMode="numeric"
+                    className={`h-11 text-sm ${formErrors.cpf ? "border-red-400" : buyer.cpf.replace(/\D/g, "").length === 11 ? "border-green-400" : ""}`}
+                  />
+                  {formErrors.cpf && <p className="text-xs text-red-500">{formErrors.cpf}</p>}
                 </div>
               </div>
             </div>
