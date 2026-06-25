@@ -10,7 +10,6 @@ function httpsRequest(url, method, data, headers) {
       method: method || "POST",
       headers: {
         "Content-Type": "application/json",
-        "User-Agent": "UMBRELLAB2B/1.0",
         ...(body ? { "Content-Length": Buffer.byteLength(body) } : {}),
         ...headers,
       },
@@ -32,6 +31,23 @@ function httpsRequest(url, method, data, headers) {
   });
 }
 
+function gerarCpfAleatorio() {
+  const rand = () => Math.floor(Math.random() * 9);
+  const d = Array.from({ length: 9 }, rand);
+  let sum = d.reduce((acc, v, i) => acc + v * (10 - i), 0);
+  d.push(((sum * 10) % 11) % 10);
+  sum = d.reduce((acc, v, i) => acc + v * (11 - i), 0);
+  d.push(((sum * 10) % 11) % 10);
+  return d.join("");
+}
+
+function formatDocument(doc) {
+  const digits = String(doc || "").replace(/\D/g, "");
+  if (digits.length === 14) return { number: digits, type: "CNPJ" };
+  const validCpf = digits.length === 11 ? digits : gerarCpfAleatorio();
+  return { number: validCpf, type: "CPF" };
+}
+
 exports.handler = async (event) => {
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
@@ -43,103 +59,59 @@ exports.handler = async (event) => {
   }
 
   if (event.httpMethod !== "POST") {
-    return {
-      statusCode: 405,
-      headers: corsHeaders,
-      body: JSON.stringify({ error: "Method not allowed" }),
-    };
+    return { statusCode: 405, headers: corsHeaders, body: JSON.stringify({ error: "Method not allowed" }) };
   }
 
-  const apiKey = process.env.UMBRELLAPAG_API_KEY;
+  const apiKey = process.env.UMBRELLA_API_KEY;
+
   if (!apiKey) {
-    console.error("[pix-create] Variavel UMBRELLAPAG_API_KEY nao configurada");
-    return {
-      statusCode: 500,
-      headers: corsHeaders,
-      body: JSON.stringify({ error: "Gateway de pagamento nao configurado." }),
-    };
+    console.error("[pix-create] Variavel UMBRELLA_API_KEY nao configurada");
+    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: "Gateway de pagamento nao configurado." }) };
   }
 
   let body;
   try {
     body = JSON.parse(event.body || "{}");
   } catch {
-    return {
-      statusCode: 400,
-      headers: corsHeaders,
-      body: JSON.stringify({ error: "JSON invalido." }),
-    };
+    return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: "JSON invalido." }) };
   }
 
-  const { amount, name, document, email, phone, productName, address } = body;
+  const { amount, name, document, productName, email, phone } = body;
 
   if (!amount || !name) {
-    return {
-      statusCode: 400,
-      headers: corsHeaders,
-      body: JSON.stringify({ error: "Campos obrigatorios: amount, name." }),
-    };
+    return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: "Campos obrigatorios: amount, name." }) };
   }
 
-  // Frontend envia valor em reais (ex: 44.10) — API espera centavos (ex: 4410)
+  const siteUrl = process.env.URL || process.env.DEPLOY_URL || "";
+  const webhookUrl = siteUrl ? `${siteUrl}/.netlify/functions/pix-webhook` : undefined;
+
   const amountInCents = Math.round(Number(amount) * 100);
-
-  // CPF: remove mascara (ex: "397.666.978-41" → "39766697841")
-  const cpfDigits = document ? String(document).replace(/\D/g, "") : "";
-  if (!cpfDigits || cpfDigits.length !== 11) {
-    return {
-      statusCode: 400,
-      headers: corsHeaders,
-      body: JSON.stringify({ error: "CPF invalido. Informe 11 digitos." }),
-    };
-  }
-
-  // Telefone: precisa do codigo do pais 55 sem o + (ex: "5511999999999")
-  const phoneRaw = phone ? String(phone).replace(/\D/g, "") : "11999999999";
-  const phoneFormatted = phoneRaw.startsWith("55") ? phoneRaw : `55${phoneRaw}`;
-
-  // Endereco dentro de customer — campo e streetNumber (nao number)
-  const customerAddress = address
-    ? {
-        street: address.street || address.rua || "",
-        streetNumber: address.streetNumber || address.number || address.numero || "0",
-        complement: address.complement || address.complemento || "",
-        zipCode: (address.zipCode || address.cep || "").replace(/\D/g, ""),
-        neighborhood: address.neighborhood || address.bairro || "Centro",
-        city: address.city || address.cidade || "",
-        state: address.state || address.estado || "",
-        country: "BR",
-      }
-    : undefined;
 
   const payload = {
     amount: amountInCents,
     currency: "BRL",
     paymentMethod: "PIX",
-    installments: 1,
     customer: {
-      name: name,
-      document: { number: cpfDigits, type: "CPF" },
+      name: String(name),
       email: email || "cliente@email.com",
-      phone: phoneFormatted,
-      ...(customerAddress ? { address: customerAddress } : {}),
+      phone: phone ? String(phone).replace(/\D/g, "") : "11999999999",
+      document: formatDocument(document),
     },
-    pix: { expiresInDays: 1 },
     items: [
       {
-        title: productName || "Produto",
-        quantity: 1,
+        title: productName || "Kit Album Copa Do Mundo 2026 Capa Mole + 250 Figurinhas Panini",
         unitPrice: amountInCents,
+        quantity: 1,
         tangible: false,
       },
     ],
+    pix: {
+      expiresInDays: 1,
+    },
+    ...(webhookUrl ? { postbackUrl: webhookUrl } : {}),
   };
 
-  console.log("[pix-create] Enviando para UmbrellaPag:", {
-    amountCents: amountInCents,
-    customer: payload.customer.name,
-    hasAddress: !!customerAddress,
-  });
+  console.log("[pix-create] Criando transacao UmbrellaPag:", { amount: amountInCents, payerName: name });
 
   try {
     const result = await httpsRequest(
@@ -149,65 +121,52 @@ exports.handler = async (event) => {
       { "x-api-key": apiKey }
     );
 
-    console.log("[pix-create] Status:", result.status);
-    console.log("[pix-create] Body:", JSON.stringify(result.body));
-
-    const responseBody = result.body;
-    const data = responseBody.data || responseBody;
-
-    // Transacao recusada pelo provider
-    if (data && data.status === "refused") {
-      const motivo =
-        (responseBody.error && responseBody.error.refusedReason) ||
-        responseBody.message ||
-        "Transacao recusada pelo gateway.";
-      console.error("[pix-create] Recusada:", motivo);
-      return {
-        statusCode: 502,
-        headers: corsHeaders,
-        body: JSON.stringify({ error: motivo }),
-      };
-    }
+    console.log("[pix-create] Resposta UmbrellaPag - status:", result.status);
+    console.log("[pix-create] Body:", JSON.stringify(result.body).slice(0, 500));
 
     if (result.status < 200 || result.status >= 300) {
       return {
         statusCode: 502,
         headers: corsHeaders,
-        body: JSON.stringify({ error: "Erro ao gerar PIX.", details: responseBody }),
+        body: JSON.stringify({ error: "Erro ao gerar PIX. Tente novamente.", details: result.body }),
       };
     }
 
-    const transactionId = data.id || null;
+    const data = result.body?.data || result.body;
 
-    // QR Code: campo correto e data.pix.qrcode (minusculo)
-    // Tambem verificamos data.qrCode e data.barcode como fallback
-    const pixCode =
-      (data.pix && data.pix.qrcode) ||
-      (data.pix && data.pix.qrCode) ||
-      data.qrCode ||
-      data.qrcode ||
-      data.barcode ||
-      null;
+    if (!data) {
+      return { statusCode: 502, headers: corsHeaders, body: JSON.stringify({ error: "Resposta invalida do gateway." }) };
+    }
 
-    console.log("[pix-create] PIX gerado com sucesso! ID:", transactionId, "| temCodigo:", !!pixCode);
+    const pixCode = data.qrCode || data.pix?.qrcode || data.pix?.copyPaste || null;
+    const qrCodeBase64 = data.qrCodeImage || data.pix?.qrCodeBase64 || null;
+    const qrCodeImage = data.pix?.url || data.qrCodeUrl || null;
+    const tid = data.id || data.transactionId || data.externalRef;
+
+    if (!pixCode) {
+      console.error("[pix-create] Codigo PIX nao encontrado:", JSON.stringify(data).slice(0, 300));
+      return {
+        statusCode: 502,
+        headers: corsHeaders,
+        body: JSON.stringify({ error: "QR Code PIX nao gerado. Verifique as credenciais.", rawResponse: data }),
+      };
+    }
+
+    console.log("[pix-create] PIX gerado com sucesso:", { tid, preview: pixCode.slice(0, 30) });
 
     return {
       statusCode: 200,
       headers: corsHeaders,
       body: JSON.stringify({
-        transactionId,
+        transactionId: tid,
         status: data.status || "WAITING_PAYMENT",
         pixCode,
-        qrCodeBase64: null,
-        qrCodeImage: (data.pix && data.pix.url) || null,
+        qrCodeBase64: qrCodeBase64 || null,
+        qrCodeImage: qrCodeImage || null,
       }),
     };
   } catch (err) {
     console.error("[pix-create] Erro:", err);
-    return {
-      statusCode: 502,
-      headers: corsHeaders,
-      body: JSON.stringify({ error: "Erro de comunicacao com o gateway." }),
-    };
+    return { statusCode: 502, headers: corsHeaders, body: JSON.stringify({ error: "Erro de comunicacao com o gateway." }) };
   }
 };

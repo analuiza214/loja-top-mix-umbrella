@@ -101,24 +101,42 @@ exports.handler = async (event) => {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "JSON invalido." }) };
   }
 
-  const { transactionId, status, transactionType, clientName, value } = notification;
+  console.log(JSON.stringify({ event: "UMBRELLA_WEBHOOK_RECEIVED", body: JSON.stringify(notification).slice(0, 500) }));
 
-  console.log(JSON.stringify({ event: "WEBHOOK_RECEIVED", transactionId, status, transactionType, clientName }));
-
-  // Responde 200 imediatamente ? gateway nao vai reenviar
   const okResponse = { statusCode: 200, headers, body: JSON.stringify({ received: true }) };
 
-  // So processa deposito PIX confirmado
-  const rawStatus = (status || "").toUpperCase();
-  const rawType = (transactionType || "").toUpperCase();
-  const isPaid =
-    rawStatus === "COMPLETO" || rawStatus === "PAID" ||
-    rawStatus === "APPROVED" || rawStatus === "PAGO";
-  const isDeposit =
-    !rawType || rawType === "DEPOSITO" || rawType === "DEPOSIT" || rawType === "PIX";
+  const transactionData = notification?.data || notification;
 
-  if (!isPaid || !isDeposit) {
-    console.log(JSON.stringify({ event: "WEBHOOK_IGNORED", reason: "not_paid_or_not_deposit", status, transactionType }));
+  const transactionId =
+    transactionData?.id ||
+    transactionData?.transactionId ||
+    notification?.transactionId ||
+    null;
+
+  const rawStatus = (
+    transactionData?.status ||
+    notification?.status ||
+    ""
+  ).toUpperCase();
+
+  const clientName =
+    transactionData?.customer?.name ||
+    notification?.clientName ||
+    "";
+
+  const valueCents =
+    transactionData?.amount ||
+    notification?.amount ||
+    null;
+
+  const valueReais = valueCents ? (valueCents / 100).toFixed(2) : null;
+
+  console.log(JSON.stringify({ event: "UMBRELLA_WEBHOOK_PARSED", transactionId, status: rawStatus, clientName }));
+
+  const isPaid = ["PAID", "PAGO", "APPROVED", "CONFIRMED", "COMPLETED", "COMPLETO", "CONCLUIDO"].includes(rawStatus);
+
+  if (!isPaid) {
+    console.log(JSON.stringify({ event: "WEBHOOK_IGNORED", reason: "not_paid", status: rawStatus }));
     return okResponse;
   }
 
@@ -148,7 +166,7 @@ exports.handler = async (event) => {
     return okResponse;
   }
 
-  const amount = value || lead.valor;
+  const amount = valueReais || lead.valor;
   await sendGa4Purchase(ga4ApiSecret, lead, transactionId, amount);
   await markLeadAsPaid(supabaseUrl, serviceKey, lead.id);
 

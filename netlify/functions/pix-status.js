@@ -1,15 +1,16 @@
 const https = require("https");
 
-function httpsRequest(url, method, headers) {
+function httpsRequest(url, method, data, headers) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
+    const body = data ? JSON.stringify(data) : null;
     const options = {
       hostname: parsed.hostname,
       path: parsed.pathname + parsed.search,
       method: method || "GET",
       headers: {
         "Content-Type": "application/json",
-        "User-Agent": "UMBRELLAB2B/1.0",
+        ...(body ? { "Content-Length": Buffer.byteLength(body) } : {}),
         ...headers,
       },
     };
@@ -25,6 +26,7 @@ function httpsRequest(url, method, headers) {
       });
     });
     req.on("error", reject);
+    if (body) req.write(body);
     req.end();
   });
 }
@@ -40,99 +42,50 @@ exports.handler = async (event) => {
   }
 
   if (event.httpMethod !== "GET") {
-    return {
-      statusCode: 405,
-      headers,
-      body: JSON.stringify({ error: "Method not allowed" }),
-    };
+    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
   }
 
-  const transactionId =
-    event.queryStringParameters && event.queryStringParameters.transactionId;
-
+  const transactionId = event.queryStringParameters && event.queryStringParameters.transactionId;
   if (!transactionId) {
-    return {
-      statusCode: 400,
-      headers,
-      body: JSON.stringify({ error: "transactionId obrigatorio" }),
-    };
+    return { statusCode: 400, headers, body: JSON.stringify({ error: "transactionId obrigatorio" }) };
   }
 
-  const apiKey = process.env.UMBRELLAPAG_API_KEY;
+  const apiKey = process.env.UMBRELLA_API_KEY;
 
   if (!apiKey) {
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({ error: "Gateway nao configurado" }),
-    };
+    return { statusCode: 500, headers, body: JSON.stringify({ error: "Gateway nao configurado" }) };
   }
 
   console.log("[pix-status] Consultando transacao UmbrellaPag:", transactionId);
 
   try {
     const result = await httpsRequest(
-      `https://api-gateway.umbrellapag.com/api/user/transactions/${transactionId}`,
+      `https://api-gateway.umbrellapag.com/api/user/transactions/${encodeURIComponent(transactionId)}`,
       "GET",
+      null,
       { "x-api-key": apiKey }
     );
 
-    console.log(
-      "[pix-status] Resposta:",
-      result.status,
-      JSON.stringify(result.body)
-    );
+    console.log("[pix-status] Resposta:", result.status, JSON.stringify(result.body).slice(0, 300));
 
     if (result.status === 404) {
       return {
-        statusCode: 404,
+        statusCode: 200,
         headers,
-        body: JSON.stringify({ error: "Transacao nao encontrada" }),
+        body: JSON.stringify({ transactionId, status: "NOT_FOUND", isPaid: false, isExpired: false }),
       };
     }
 
-    if (result.status < 200 || result.status >= 300) {
-      return {
-        statusCode: 502,
-        headers,
-        body: JSON.stringify({
-          error: "Erro ao consultar status do pagamento.",
-          details: result.body,
-        }),
-      };
-    }
-
-    const responseBody = result.body;
-    const transaction = responseBody.data || responseBody;
+    const data = result.body?.data || result.body;
 
     const rawStatus = (
-      transaction.status ||
-      transaction.transactionState ||
-      transaction.state ||
+      data?.status ||
+      data?.transactionState ||
       ""
     ).toUpperCase();
 
-    // Status de pagamento confirmado na UmbrellaPag
-    const isPaid = [
-      "PAID",
-      "APPROVED",
-      "COMPLETED",
-      "CONCLUIDO",
-      "PAGO",
-      "APROVADO",
-      "COMPLETO",
-    ].includes(rawStatus);
-
-    // Status de expiração/cancelamento
-    const isExpired = [
-      "EXPIRED",
-      "CANCELLED",
-      "CANCELED",
-      "FAILED",
-      "EXPIRADO",
-      "CANCELADO",
-      "FALHA",
-    ].includes(rawStatus);
+    const isPaid = ["PAID", "PAGO", "APPROVED", "CONFIRMED", "COMPLETED", "COMPLETO", "CONCLUIDO"].includes(rawStatus);
+    const isExpired = ["CANCELLED", "CANCELADO", "EXPIRED", "EXPIRADO", "REFUSED", "RECUSADO", "FAILED", "FALHA"].includes(rawStatus);
 
     return {
       statusCode: 200,
@@ -142,11 +95,7 @@ exports.handler = async (event) => {
         status: rawStatus,
         isPaid,
         isExpired,
-        payedAt:
-          transaction.paidAt ||
-          transaction.updatedAt ||
-          transaction.updated_at ||
-          null,
+        payedAt: data?.paidAt || data?.updatedAt || null,
       }),
     };
   } catch (err) {
